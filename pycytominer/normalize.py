@@ -4,6 +4,7 @@ Normalize observation features based on specified normalization method
 
 from typing import Any, Literal, Optional, Union
 
+import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
@@ -42,9 +43,20 @@ def normalize(
         A list of strings corresponding to feature measurement column names in the
         `profiles` DataFrame. All features listed must be found in `profiles`.
         Defaults to "infer". If "infer", then assume features are from CellProfiler output and
-        prefixed with "Cells", "Nuclei", or "Cytoplasm".
+        prefixed with "Cells", "Nuclei", or "Cytoplasm". Selected feature columns
+        must be numeric. Missing values are allowed as long as the column
+        remains numeric. As a temporary compatibility measure, Pycytominer
+        also treats common missing-value strings such as ``"nan"`` and
+        ``"None"`` as missing values in selected feature columns before
+        numeric validation. If you are working with mixed profile and image
+        payload data, pass explicit feature columns when needed to avoid
+        selecting non-profile content.
     image_features: bool, default False
-        Whether the profiles contain image features.
+        Whether to include inferred ``Image_*`` feature columns alongside the
+        default CellProfiler compartments. This preserves support for numeric
+        image-level measurements while avoiding non-numeric ``Image_*``
+        payload columns from OME-Arrow-backed or similarly mixed tables.
+        Non-normalized image payload columns are preserved in the output.
     meta_features : list
         A list of strings corresponding to metadata column names in the `profiles`
         DataFrame. All features listed must be found in `profiles`. Defaults to "infer".
@@ -97,6 +109,15 @@ def normalize(
         str:
             If output_file is provided, then the function returns the path to the
             output file.
+
+    Raises
+    ------
+    ValueError
+        Raised when inferred or manually selected feature columns are non-numeric,
+        because Pycytominer normalization methods operate on numeric features
+        only. In that case, select numeric features explicitly before calling
+        ``normalize()``, for example by passing a curated feature list or by
+        running ``feature_select()`` first.
 
     Examples
     --------
@@ -164,6 +185,77 @@ def normalize(
     if isinstance(features, str):
         raise ValueError("features must be a list of strings, not a single string")
 
+    # Temporary compatibility path for accommodating CellProfiler-style imports
+    # that encode
+    # missing feature values as strings such as "nan" or "None". Only
+    # missing-value-like strings are coerced; other non-numeric content still
+    # fails validation below. String matching is case-insensitive after
+    # whitespace stripping and lowercasing.
+    missing_string_tokens = {"", "na", "n/a", "nan", "none", "null"}
+    for feature in features:
+        # Already-numeric feature columns do not need compatibility cleanup.
+        if pd.api.types.is_numeric_dtype(profiles[feature]):
+            continue
+
+        non_null_values = profiles[feature].dropna()
+        # A column of only missing values can pass through to downstream numeric
+        # handling without special coercion here.
+        if non_null_values.empty:
+            continue
+
+        # Split mixed object columns into string markers versus other values so
+        # we can distinguish missing-value strings from truly malformed content.
+        string_values = non_null_values[
+            non_null_values.map(lambda value: isinstance(value, str))
+        ]
+        non_string_values = non_null_values[
+            non_null_values.map(lambda value: not isinstance(value, str))
+        ]
+
+        # Non-string values must still be numeric for this compatibility path
+        # to apply.
+        non_string_values_are_numeric = non_string_values.map(
+            pd.api.types.is_number
+        ).all()
+
+        # If the column contains no strings, or mixes strings with non-numeric
+        # payloads, leave it untouched so validation can reject it below.
+        if not non_string_values_are_numeric or string_values.empty:
+            continue
+
+        # Only coerce when every remaining string is a missing-value marker;
+        # this avoids silently converting arbitrary strings to NaN.
+        if (
+            string_values
+            .map(lambda value: value.strip().lower())
+            .isin(missing_string_tokens)
+            .all()
+        ):
+            profiles[feature] = profiles[feature].map(
+                lambda value: (
+                    np.nan
+                    if isinstance(value, str)
+                    and value.strip().lower() in missing_string_tokens
+                    else value
+                )
+            )
+            profiles[feature] = pd.to_numeric(profiles[feature], errors="coerce")
+
+    non_numeric_features = [
+        feature
+        for feature in features
+        if not pd.api.types.is_numeric_dtype(profiles[feature])
+    ]
+    if non_numeric_features:
+        raise ValueError(
+            "normalize() requires numeric feature columns. "
+            "Found non-numeric columns: "
+            f"{non_numeric_features}. "
+            "Select numeric features explicitly before normalization, "
+            "for example by passing a curated feature list or by running "
+            "feature_select() first."
+        )
+
     # Separate out the features and meta
     feature_df = profiles.loc[:, features]
     if meta_features == "infer":
@@ -173,6 +265,18 @@ def normalize(
         raise ValueError("meta_features must be a list of strings, not a single string")
 
     meta_df = profiles.loc[:, meta_features]
+    # Preserve image payload columns without normalizing them. The
+    # ``ome_arrow_*`` prefix is a flexible naming convention used here for
+    # OME-Arrow payload columns, not a strict upstream requirement; see the
+    # ome-arrow project docs for the broader format context:
+    # https://pypi.org/project/ome-arrow/
+    passthrough_image_columns = [
+        column
+        for column in profiles.columns
+        if column not in set(features).union(meta_features)
+        and (column.startswith("Image_") or column.startswith("ome_arrow_"))
+    ]
+    passthrough_image_df = profiles.loc[:, passthrough_image_columns]
 
     # Fit the sklearn scaler
     if samples == "all":
@@ -191,7 +295,7 @@ def normalize(
         index=feature_df.index,
     )
 
-    normalized = meta_df.merge(feature_df, left_index=True, right_index=True)
+    normalized = pd.concat([meta_df, passthrough_image_df, feature_df], axis="columns")
 
     if feature_df.shape != profiles.loc[:, features].shape:
         error_detail = "The number of rows and columns in the feature dataframe does not match the original dataframe"
@@ -199,7 +303,8 @@ def normalize(
         raise ValueError(f"{error_detail}. This is likely a bug in {context}")
 
     if (normalized.shape[0] != profiles.shape[0]) or (
-        normalized.shape[1] != len(features) + len(meta_features)
+        normalized.shape[1]
+        != len(features) + len(meta_features) + len(passthrough_image_columns)
     ):
         error_detail = "The number of rows and columns in the normalized dataframe does not match the original dataframe"
         context = f"the `{method}` method in `pycytominer.normalize`"

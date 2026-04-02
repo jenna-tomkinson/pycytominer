@@ -87,6 +87,14 @@ def infer_cp_features(
 ) -> list[str]:
     """Given CellProfiler output data read as a DataFrame, output feature column names as a list.
 
+    Inferred feature columns will match expected CellProfiler prefixes (for
+    example, ``Cells_``, ``Cytoplasm_``, and ``Nuclei_``). When
+    ``image_features=True``, the function excludes non-numeric ``Image_*``
+    columns from inferred features. This is important for use cases that
+    combine profile features with image payload columns under the ``Image_*``
+    prefix, such as OME-Arrow. The function also excludes columns with nested
+    object values, even if they use a CellProfiler-like prefix.
+
     Parameters
     ----------
     population_df : pd.DataFrame
@@ -98,12 +106,17 @@ def infer_cp_features(
         If metadata is set to True, find column names that begin with the `Metadata_` prefix.
         This convention is expected by CellProfiler defaults.
     image_features : bool, default False
-        Whether or not the profiles contain image features.
+        Whether or not to include ``Image_*`` columns in inferred features.
+        When True, Pycytominer includes numeric image features alongside the
+        default CellProfiler compartments, while still excluding non-numeric
+        ``Image_*`` columns. This avoids treating image payload columns as
+        profile features in data layouts that store both under the same
+        ``Image_*`` prefix, such as OME-Arrow-backed tables.
 
     Returns
     -------
     features: list of str
-        List of Cell Painting features.
+        List of inferred Cell Painting feature column names.
     """
 
     compartments = convert_compartment_format_to_list(compartments)
@@ -114,8 +127,21 @@ def infer_cp_features(
 
     features = []
     for col in population_df.columns.tolist():
-        if any(col.startswith(x.title()) for x in compartments):
-            features.append(col)
+        if not any(col.startswith(x.title()) for x in compartments):
+            continue
+
+        # Exclude nested object payloads while allowing scalar object values.
+        if population_df[col].dtype == "object":
+            non_null_values = population_df[col].dropna()
+            if any(not pd.api.types.is_scalar(value) for value in non_null_values):
+                continue
+
+        if col.startswith("Image_") and not pd.api.types.is_numeric_dtype(
+            population_df[col]
+        ):
+            continue
+
+        features.append(col)
 
     if metadata:
         features = population_df.columns[

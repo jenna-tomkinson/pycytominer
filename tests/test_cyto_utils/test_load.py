@@ -10,12 +10,19 @@ import pandas as pd
 import pytest
 
 from pycytominer.cyto_utils import (
+    load_cytotable_profiles,
     load_npz_features,
     load_npz_locations,
     load_platemap,
     load_profiles,
 )
-from pycytominer.cyto_utils.load import infer_delim, is_path_a_parquet_file
+from pycytominer.cyto_utils.load import (
+    infer_delim,
+    is_path_a_parquet_dataset_dir,
+    is_path_a_parquet_file,
+    resolve_cytotable_profiles_target,
+    resolve_parquet_path,
+)
 
 random.seed(123)
 
@@ -60,6 +67,18 @@ example_npz_file_locations = os.path.join(
     "features",
     "SQ00014812",
     "A01_1.npz",
+)
+
+example_iceberg_root = (
+    ROOT_DIR / "tests" / "test_data" / "cytotable" / "examplehuman_iceberg_warehouse"
+)
+example_iceberg_warehouse = example_iceberg_root / "warehouse"
+example_iceberg_profiles_table = (
+    example_iceberg_warehouse / "profiles" / "joined_profiles"
+)
+example_iceberg_image_crops_table = example_iceberg_warehouse / "images" / "image_crops"
+example_ome_parquet = (
+    ROOT_DIR / "tests" / "test_data" / "cytodataframe" / "example.ome.parquet"
 )
 
 # Build data to use in tests
@@ -160,6 +179,172 @@ def test_load_profiles():
     # loading in-memory anndata
     adata_profile_test = load_profiles(adata)
     pd.testing.assert_frame_equal(adata_profile_test, data_df)
+
+    # loading parquet datasets from a CytoTable-style warehouse layout
+    profiles_from_iceberg_table = load_profiles(example_iceberg_profiles_table)
+    profiles_from_iceberg_data = load_profiles(example_iceberg_profiles_table / "data")
+    expected_iceberg_profiles = pd.read_parquet(
+        resolve_parquet_path(example_iceberg_profiles_table), engine="pyarrow"
+    )
+    pd.testing.assert_frame_equal(
+        profiles_from_iceberg_table, expected_iceberg_profiles
+    )
+    pd.testing.assert_frame_equal(profiles_from_iceberg_data, expected_iceberg_profiles)
+
+    profiles_from_iceberg_root = load_profiles(example_iceberg_root)
+    profiles_from_iceberg_warehouse = load_profiles(example_iceberg_warehouse)
+    pd.testing.assert_frame_equal(profiles_from_iceberg_root, expected_iceberg_profiles)
+    pd.testing.assert_frame_equal(
+        profiles_from_iceberg_warehouse, expected_iceberg_profiles
+    )
+
+    image_crops = load_profiles(example_iceberg_image_crops_table)
+    assert "ome_arrow_image" in image_crops.columns
+    assert image_crops["ome_arrow_image"].dtype == "object"
+
+    ome_parquet = load_profiles(example_ome_parquet)
+    assert "Image_FileName_GFP_OMEArrow_ORIG" in ome_parquet.columns
+    assert ome_parquet["Image_FileName_GFP_OMEArrow_ORIG"].dtype == "object"
+
+    with pytest.raises(
+        FileNotFoundError,
+        match=r"load_profiles\(\) didn't find the path: .*missing\.parquet\.",
+    ):
+        load_profiles(ROOT_DIR / "tests" / "test_data" / "missing.parquet")
+
+
+def test_resolve_cytotable_profiles_target_ambiguous(tmp_path):
+    warehouse_root = tmp_path / "warehouse"
+    first_table = warehouse_root / "profiles" / "joined_profiles" / "data"
+    second_table = warehouse_root / "profiles" / "normalized_profiles" / "data"
+
+    first_table.mkdir(parents=True)
+    second_table.mkdir(parents=True)
+
+    data_df.to_parquet(first_table / "part-00000.parquet", engine="pyarrow")
+    data_df.to_parquet(second_table / "part-00000.parquet", engine="pyarrow")
+
+    with pytest.raises(ValueError, match="multiple parquet-backed profile tables"):
+        resolve_cytotable_profiles_target(tmp_path)
+
+    with pytest.raises(ValueError, match="multiple parquet-backed profile tables"):
+        load_profiles(tmp_path)
+
+
+def test_resolve_cytotable_profiles_target_warehouse_root():
+    resolved = resolve_cytotable_profiles_target(example_iceberg_warehouse)
+
+    assert resolved == (example_iceberg_warehouse, "profiles", "joined_profiles")
+
+
+def test_resolve_cytotable_profiles_target_project_root():
+    resolved = resolve_cytotable_profiles_target(example_iceberg_root)
+
+    assert resolved == (example_iceberg_warehouse, "profiles", "joined_profiles")
+
+
+def test_resolve_cytotable_profiles_target_prefers_unambiguous_warehouse_root(
+    tmp_path,
+):
+    # Guard against a project directory that contains both a malformed sibling
+    # ``profiles/`` tree and a valid ``warehouse/profiles/`` tree. Resolution
+    # should still succeed when exactly one warehouse-backed profile table is
+    # unambiguous.
+    malformed_profiles_root = tmp_path / "profiles"
+    first_table = malformed_profiles_root / "joined_profiles" / "data"
+    second_table = malformed_profiles_root / "normalized_profiles" / "data"
+    warehouse_table = tmp_path / "warehouse" / "profiles" / "joined_profiles" / "data"
+
+    first_table.mkdir(parents=True)
+    second_table.mkdir(parents=True)
+    warehouse_table.mkdir(parents=True)
+
+    data_df.to_parquet(first_table / "part-00000.parquet", engine="pyarrow")
+    data_df.to_parquet(second_table / "part-00000.parquet", engine="pyarrow")
+    data_df.to_parquet(warehouse_table / "part-00000.parquet", engine="pyarrow")
+
+    resolved = resolve_cytotable_profiles_target(tmp_path)
+
+    assert resolved == (tmp_path / "warehouse", "profiles", "joined_profiles")
+
+
+def test_resolve_cytotable_profiles_target_no_match(tmp_path):
+    tmp_path.mkdir(exist_ok=True)
+
+    assert resolve_cytotable_profiles_target(tmp_path) is None
+
+
+def test_resolve_cytotable_profiles_target_missing_path(tmp_path):
+    assert resolve_cytotable_profiles_target(tmp_path / "missing") is None
+
+
+def test_is_path_a_parquet_dataset_dir_strict(tmp_path):
+    parquet_dir = tmp_path / "parquet_dir"
+    parquet_dir.mkdir()
+    data_df.to_parquet(parquet_dir / "part-00000.parquet", engine="pyarrow")
+    data_df.to_parquet(parquet_dir / "part-00001.parquet", engine="pyarrow")
+
+    assert is_path_a_parquet_dataset_dir(parquet_dir)
+
+
+def test_is_path_a_parquet_dataset_dir_rejects_mixed_files(tmp_path):
+    mixed_dir = tmp_path / "mixed_dir"
+    mixed_dir.mkdir()
+    data_df.to_parquet(mixed_dir / "part-00000.parquet", engine="pyarrow")
+    (mixed_dir / "notes.txt").write_text("not parquet", encoding="utf-8")
+
+    assert not is_path_a_parquet_dataset_dir(mixed_dir)
+
+
+def test_resolve_parquet_path_missing_file(tmp_path):
+    assert resolve_parquet_path(tmp_path / "missing.parquet") is None
+
+
+def test_load_cytotable_profiles():
+    expected_profiles = pd.read_parquet(
+        resolve_parquet_path(example_iceberg_profiles_table), engine="pyarrow"
+    )
+
+    warehouse_profiles = load_cytotable_profiles(example_iceberg_warehouse)
+    root_profiles = load_cytotable_profiles(example_iceberg_root)
+
+    pd.testing.assert_frame_equal(warehouse_profiles, expected_profiles)
+    pd.testing.assert_frame_equal(root_profiles, expected_profiles)
+
+
+def test_load_cytotable_profiles_with_explicit_table_name_and_namespace():
+    expected_profiles = pd.read_parquet(
+        resolve_parquet_path(example_iceberg_profiles_table), engine="pyarrow"
+    )
+
+    warehouse_profiles = load_cytotable_profiles(
+        warehouse_path=example_iceberg_warehouse,
+        table_name="joined_profiles",
+        namespace="profiles",
+    )
+    root_profiles = load_cytotable_profiles(
+        warehouse_path=example_iceberg_root,
+        table_name="joined_profiles",
+        namespace="profiles",
+    )
+
+    pd.testing.assert_frame_equal(warehouse_profiles, expected_profiles)
+    pd.testing.assert_frame_equal(root_profiles, expected_profiles)
+
+
+def test_load_cytotable_profiles_rejects_missing_or_malformed_targets(tmp_path):
+    with pytest.raises(FileNotFoundError, match="No such file or directory"):
+        load_cytotable_profiles(tmp_path / "missing")
+
+    malformed_root = tmp_path / "warehouse"
+    malformed_table = malformed_root / "profiles" / "joined_profiles"
+    malformed_table.mkdir(parents=True)
+    (malformed_table / "notes.txt").write_text("not parquet", encoding="utf-8")
+
+    with pytest.raises(
+        FileNotFoundError, match="Could not find a parquet-backed table"
+    ):
+        load_cytotable_profiles(malformed_root)
 
 
 def test_load_platemap():

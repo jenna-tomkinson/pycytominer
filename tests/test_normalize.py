@@ -78,6 +78,14 @@ data_no_var_df = pd.concat(
     [data_df, pd.DataFrame([1] * data_df.shape[0], columns=["yy"])], axis="columns"
 )
 
+ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
+EXAMPLE_OME_PARQUET = os.path.join(
+    ROOT_DIR, "tests", "test_data", "cytodataframe", "example.ome.parquet"
+)
+EXAMPLE_ICEBERG_ROOT = os.path.join(
+    ROOT_DIR, "tests", "test_data", "cytotable", "examplehuman_iceberg_warehouse"
+)
+
 
 def test_normalize_standardize_allsamples():
     """
@@ -113,6 +121,277 @@ def test_normalize_standardize_allsamples():
     }).reset_index(drop=True)
 
     pd.testing.assert_frame_equal(normalize_result, expected_result)
+
+
+def test_normalize_preserves_ome_arrow_columns_when_inferred():
+    profiles_path = os.path.join(
+        ROOT_DIR,
+        "tests",
+        "test_data",
+        "cytotable",
+        "examplehuman_iceberg_warehouse",
+        "warehouse",
+        "profiles",
+        "joined_profiles",
+        "data",
+        "00000-0-fe1e327c-3eb3-4711-833b-73ba36da733c.parquet",
+    )
+    image_crops_path = os.path.join(
+        ROOT_DIR,
+        "tests",
+        "test_data",
+        "cytotable",
+        "examplehuman_iceberg_warehouse",
+        "warehouse",
+        "images",
+        "image_crops",
+        "data",
+        "00000-0-2fa7c8c6-117b-4fab-ba87-c934a56fe88d.parquet",
+    )
+
+    profiles = (
+        pd.read_parquet(profiles_path, engine="pyarrow").head(8).reset_index(drop=True)
+    )
+    ome_arrow_columns = pd.read_parquet(image_crops_path, engine="pyarrow")[
+        ["ome_arrow_image", "ome_arrow_outline"]
+    ].head(8)
+    profiles = profiles.assign(
+        Metadata_treatment=["control"] * 4 + ["drug"] * 4,
+        ome_arrow_image=ome_arrow_columns["ome_arrow_image"].tolist(),
+        ome_arrow_outline=ome_arrow_columns["ome_arrow_outline"].tolist(),
+    )
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features="infer",
+        meta_features="infer",
+        samples="Metadata_treatment == 'control'",
+        method="standardize",
+    )
+
+    expected_metadata_columns = [
+        column for column in profiles.columns if column.startswith("Metadata_")
+    ]
+    expected_passthrough_image_columns = [
+        "Image_FileName_DNA",
+        "Image_FileName_OrigOverlay",
+        "Image_FileName_PH3",
+        "Image_FileName_cellbody",
+        "ome_arrow_image",
+        "ome_arrow_outline",
+    ]
+
+    assert "ome_arrow_image" in normalize_result.columns
+    assert "ome_arrow_outline" in normalize_result.columns
+    assert "Metadata_treatment" in normalize_result.columns
+    assert normalize_result.columns[: len(expected_metadata_columns)].tolist() == (
+        expected_metadata_columns
+    )
+    image_start = len(expected_metadata_columns)
+    image_end = image_start + len(expected_passthrough_image_columns)
+    assert normalize_result.columns[image_start:image_end].tolist() == (
+        expected_passthrough_image_columns
+    )
+    assert all(
+        column.startswith(("Cells_", "Cytoplasm_", "Nuclei_"))
+        for column in normalize_result.columns[image_end:]
+    )
+
+
+def test_normalize_example_ome_parquet_with_explicit_feature_columns():
+    profiles = pd.read_parquet(EXAMPLE_OME_PARQUET, engine="pyarrow")
+    profiles = profiles.assign(
+        Metadata_treatment=[
+            "control" if i % 2 == 0 else "drug" for i in range(len(profiles))
+        ]
+    )
+
+    normalize_result = normalize(
+        profiles=profiles,
+        # This column uses a ``Metadata_`` prefix in the source data but is
+        # intentionally normalized here as an explicit feature.
+        features=["Metadata_Cells_Number_Object_Number"],
+        meta_features=["Metadata_ImageNumber", "Metadata_treatment"],
+        samples="Metadata_treatment == 'control'",
+        method="standardize",
+    )
+
+    assert normalize_result.shape == (3, 15)
+    assert normalize_result.columns.tolist() == [
+        "Metadata_ImageNumber",
+        "Metadata_treatment",
+        "Image_FileName_GFP",
+        "Image_FileName_RFP",
+        "Image_FileName_DAPI",
+        "Image_FileName_GFP_OMEArrow_ORIG",
+        "Image_FileName_GFP_OMEArrow_LABL",
+        "Image_FileName_GFP_OMEArrow_COMP",
+        "Image_FileName_RFP_OMEArrow_ORIG",
+        "Image_FileName_RFP_OMEArrow_LABL",
+        "Image_FileName_RFP_OMEArrow_COMP",
+        "Image_FileName_DAPI_OMEArrow_ORIG",
+        "Image_FileName_DAPI_OMEArrow_LABL",
+        "Image_FileName_DAPI_OMEArrow_COMP",
+        "Metadata_Cells_Number_Object_Number",
+    ]
+
+
+def test_normalize_allows_none_missing_values_in_numeric_feature_columns():
+    profiles = data_df.copy()
+    profiles.loc[0, "x"] = None
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features=["x", "y", "z", "zz"],
+        meta_features="infer",
+        samples="all",
+        method="standardize",
+    )
+
+    assert "x" in normalize_result.columns
+    assert pd.isna(normalize_result.loc[0, "x"])
+
+
+def test_normalize_allows_string_missing_markers_in_feature_columns():
+    profiles = data_df.copy()
+    profiles["x"] = profiles["x"].astype(object)
+    profiles.loc[0, "x"] = "nan"
+    profiles.loc[1, "x"] = "None"
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features=["x", "y", "z", "zz"],
+        meta_features="infer",
+        samples="all",
+        method="standardize",
+    )
+
+    assert "x" in normalize_result.columns
+    assert pd.isna(normalize_result.loc[0, "x"])
+    assert pd.isna(normalize_result.loc[1, "x"])
+
+
+def test_normalize_rejects_malformed_string_feature_values():
+    profiles = data_df.copy()
+    profiles["x"] = profiles["x"].astype(object)
+    profiles.loc[0, "x"] = "not_a_number"
+
+    with pytest.raises(
+        ValueError,
+        match="normalize\\(\\) requires numeric feature columns",
+    ) as exc_info:
+        normalize(
+            profiles=profiles,
+            features=["x", "y", "z", "zz"],
+            meta_features="infer",
+            samples="all",
+            method="standardize",
+        )
+
+    assert "x" in str(exc_info.value)
+    assert "feature_select() first" in str(exc_info.value)
+
+
+def test_normalize_rejects_non_numeric_feature_columns():
+    profiles = pd.read_parquet(EXAMPLE_OME_PARQUET, engine="pyarrow")
+    profiles = profiles.assign(
+        Metadata_treatment=[
+            "control" if i % 2 == 0 else "drug" for i in range(len(profiles))
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="normalize\\(\\) requires numeric feature columns",
+    ) as exc_info:
+        normalize(
+            profiles=profiles,
+            features=["Image_FileName_GFP_OMEArrow_ORIG"],
+            meta_features=["Metadata_ImageNumber", "Metadata_treatment"],
+            samples="Metadata_treatment == 'control'",
+            method="standardize",
+        )
+
+    assert "Image_FileName_GFP_OMEArrow_ORIG" in str(exc_info.value)
+    assert "feature_select() first" in str(exc_info.value)
+
+
+def test_normalize_rejects_mixed_numeric_and_ome_arrow_feature_columns():
+    profiles = pd.read_parquet(EXAMPLE_OME_PARQUET, engine="pyarrow")
+    profiles = profiles.assign(
+        Metadata_treatment=[
+            "control" if i % 2 == 0 else "drug" for i in range(len(profiles))
+        ]
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="normalize\\(\\) requires numeric feature columns",
+    ) as exc_info:
+        normalize(
+            profiles=profiles,
+            features=[
+                "Metadata_Cells_Number_Object_Number",
+                "Image_FileName_GFP_OMEArrow_ORIG",
+            ],
+            meta_features=["Metadata_ImageNumber", "Metadata_treatment"],
+            samples="Metadata_treatment == 'control'",
+            method="standardize",
+        )
+
+    assert "Image_FileName_GFP_OMEArrow_ORIG" in str(exc_info.value)
+    assert "feature_select() first" in str(exc_info.value)
+
+
+def test_normalize_warehouse_root_with_inferred_features():
+    profiles = pd.read_parquet(
+        os.path.join(
+            EXAMPLE_ICEBERG_ROOT,
+            "warehouse",
+            "profiles",
+            "joined_profiles",
+            "data",
+            "00000-0-fe1e327c-3eb3-4711-833b-73ba36da733c.parquet",
+        ),
+        engine="pyarrow",
+    )
+    profiles = profiles.assign(
+        Metadata_treatment=[
+            "control" if i % 2 == 0 else "drug" for i in range(len(profiles))
+        ]
+    )
+
+    normalize_result = normalize(
+        profiles=profiles,
+        features="infer",
+        meta_features="infer",
+        samples="Metadata_treatment == 'control'",
+        method="standardize",
+    )
+
+    expected_metadata_columns = [
+        column for column in profiles.columns if column.startswith("Metadata_")
+    ]
+    expected_passthrough_image_columns = [
+        "Image_FileName_DNA",
+        "Image_FileName_OrigOverlay",
+        "Image_FileName_PH3",
+        "Image_FileName_cellbody",
+    ]
+
+    assert "Metadata_treatment" in normalize_result.columns
+    assert normalize_result.columns[: len(expected_metadata_columns)].tolist() == (
+        expected_metadata_columns
+    )
+    image_start = len(expected_metadata_columns)
+    image_end = image_start + len(expected_passthrough_image_columns)
+    assert normalize_result.columns[image_start:image_end].tolist() == (
+        expected_passthrough_image_columns
+    )
+    assert all(
+        column.startswith(("Cells_", "Cytoplasm_", "Nuclei_"))
+        for column in normalize_result.columns[image_end:]
+    )
 
 
 def test_normalize_standardize_ctrlsamples():
