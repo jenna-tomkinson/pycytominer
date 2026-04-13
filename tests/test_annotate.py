@@ -105,18 +105,24 @@ def test_annotate_merge():
 
 def test_annotate_external():
     # Test that the external_metadata
+    external_metadata_df = EXTERNAL_METADATA_DF.rename(
+        columns={
+            "gene": "Metadata_gene",
+            "pathway": "Metadata_pathway",
+            "time_h": "Metadata_time_h",
+        }
+    )
     expected_result = (
         DATA_DF
         .merge(
             PLATEMAP_DF, left_on="Metadata_Well", right_on="well_position", how="left"
         )
-        .merge(EXTERNAL_METADATA_DF, left_on="gene", right_on="gene", how="left")
-        .rename(
-            columns={
-                "gene": "Metadata_gene",
-                "pathway": "Metadata_pathway",
-                "time_h": "Metadata_time_h",
-            }
+        .rename(columns={"gene": "Metadata_gene"})
+        .merge(
+            external_metadata_df,
+            left_on="Metadata_gene",
+            right_on="Metadata_gene",
+            how="left",
         )[
             [
                 "Metadata_gene",
@@ -132,11 +138,112 @@ def test_annotate_external():
     result = annotate(
         profiles=DATA_DF,
         platemap=PLATEMAP_DF,
-        external_metadata=EXTERNAL_METADATA_DF,
+        external_metadata=external_metadata_df,
         join_on=["Metadata_well_position", "Metadata_Well"],
         external_join_left=["Metadata_gene"],
         external_join_right=["Metadata_gene"],
         add_metadata_id_to_platemap=True,
+    )
+
+    pd.testing.assert_frame_equal(result, expected_result)
+
+
+def test_annotate_external_parquet_joins_before_cp_clean(tmp_path):
+    profiles_df = pd.DataFrame({
+        "Image_Metadata_Plate": ["P1", "P1"],
+        "Image_Metadata_Well": ["A01", "A02"],
+        "Image_Metadata_Site": [1, 2],
+        "Cells_AreaShape_Area": [1.0, 2.0],
+    })
+    platemap_df = pd.DataFrame({
+        "Plate": ["P1", "P1"],
+        "Well": ["A01", "A02"],
+        "gene": ["x", "y"],
+    })
+    external_metadata_df = pd.DataFrame({
+        "Image_Metadata_Plate": ["P1", "P1"],
+        "Image_Metadata_Well": ["A01", "A02"],
+        "Image_Metadata_Site": [1, 2],
+        "qc_pass": [True, False],
+    })
+    external_metadata_path = tmp_path / "qc.parquet"
+    external_metadata_df.to_parquet(external_metadata_path, engine="pyarrow")
+
+    expected_result = pd.DataFrame({
+        "Metadata_Plate": ["P1", "P1"],
+        "Metadata_Well": ["A01", "A02"],
+        "Metadata_Site": [1, 2],
+        "Metadata_gene": ["x", "y"],
+        "Metadata_qc_pass": [True, False],
+        "Cells_AreaShape_Area": [1.0, 2.0],
+    })
+
+    result = annotate(
+        profiles=profiles_df,
+        platemap=platemap_df,
+        join_on=[["Metadata_Plate", "Metadata_Well"], [
+            "Image_Metadata_Plate",
+            "Image_Metadata_Well",
+        ]],
+        external_metadata=str(external_metadata_path),
+        external_join_left=[
+            "Image_Metadata_Plate",
+            "Image_Metadata_Well",
+            "Image_Metadata_Site",
+        ],
+        external_join_right=[
+            "Image_Metadata_Plate",
+            "Image_Metadata_Well",
+            "Image_Metadata_Site",
+        ],
+    )
+
+    pd.testing.assert_frame_equal(result, expected_result)
+
+
+def test_annotate_external_parquet_with_external_join_on(tmp_path):
+    profiles_df = pd.DataFrame({
+        "Image_Metadata_Plate": ["P1", "P1"],
+        "Image_Metadata_Well": ["A01", "A02"],
+        "Image_Metadata_Site": [1, 2],
+        "Cells_AreaShape_Area": [1.0, 2.0],
+    })
+    platemap_df = pd.DataFrame({
+        "Plate": ["P1", "P1"],
+        "Well": ["A01", "A02"],
+        "gene": ["x", "y"],
+    })
+    external_metadata_df = pd.DataFrame({
+        "Image_Metadata_Plate": ["P1", "P1"],
+        "Image_Metadata_Well": ["A01", "A02"],
+        "Image_Metadata_Site": [1, 2],
+        "Metadata_qc_pass": [True, False],
+    })
+    external_metadata_path = tmp_path / "qc_join_on.parquet"
+    external_metadata_df.to_parquet(external_metadata_path, engine="pyarrow")
+
+    expected_result = pd.DataFrame({
+        "Metadata_Plate": ["P1", "P1"],
+        "Metadata_Well": ["A01", "A02"],
+        "Metadata_Site": [1, 2],
+        "Metadata_gene": ["x", "y"],
+        "Metadata_qc_pass": [True, False],
+        "Cells_AreaShape_Area": [1.0, 2.0],
+    })
+
+    result = annotate(
+        profiles=profiles_df,
+        platemap=platemap_df,
+        join_on=[["Metadata_Plate", "Metadata_Well"], [
+            "Image_Metadata_Plate",
+            "Image_Metadata_Well",
+        ]],
+        external_metadata=str(external_metadata_path),
+        external_join_on=[
+            "Image_Metadata_Plate",
+            "Image_Metadata_Well",
+            "Image_Metadata_Site",
+        ],
     )
 
     pd.testing.assert_frame_equal(result, expected_result)
