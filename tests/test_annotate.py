@@ -181,10 +181,13 @@ def test_annotate_external_parquet_joins_before_cp_clean(tmp_path):
     result = annotate(
         profiles=profiles_df,
         platemap=platemap_df,
-        join_on=[["Metadata_Plate", "Metadata_Well"], [
-            "Image_Metadata_Plate",
-            "Image_Metadata_Well",
-        ]],
+        join_on=[
+            ["Metadata_Plate", "Metadata_Well"],
+            [
+                "Image_Metadata_Plate",
+                "Image_Metadata_Well",
+            ],
+        ],
         external_metadata=str(external_metadata_path),
         external_join_left=[
             "Image_Metadata_Plate",
@@ -234,10 +237,13 @@ def test_annotate_external_parquet_with_external_join_on(tmp_path):
     result = annotate(
         profiles=profiles_df,
         platemap=platemap_df,
-        join_on=[["Metadata_Plate", "Metadata_Well"], [
-            "Image_Metadata_Plate",
-            "Image_Metadata_Well",
-        ]],
+        join_on=[
+            ["Metadata_Plate", "Metadata_Well"],
+            [
+                "Image_Metadata_Plate",
+                "Image_Metadata_Well",
+            ],
+        ],
         external_metadata=str(external_metadata_path),
         external_join_on=[
             "Image_Metadata_Plate",
