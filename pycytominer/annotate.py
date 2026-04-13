@@ -2,7 +2,6 @@
 Annotates profiles with metadata information
 """
 
-import os
 from typing import Literal, Optional, Union
 
 import pandas as pd
@@ -30,8 +29,9 @@ def annotate(
     format_broad_cmap: bool = False,
     clean_cellprofiler: bool = True,
     external_metadata: Optional[Union[str, pd.DataFrame]] = None,
-    external_join_left: Optional[str] = None,
-    external_join_right: Optional[str] = None,
+    external_join_on: Optional[Union[str, list[str]]] = None,
+    external_join_left: Optional[Union[str, list[str]]] = None,
+    external_join_right: Optional[Union[str, list[str]]] = None,
     compression_options: Optional[Union[str, dict[str, str]]] = None,
     float_format: Optional[str] = None,
     cmap_args: Optional[dict[str, Union[str]]] = None,
@@ -59,11 +59,15 @@ def annotate(
     clean_cellprofiler: bool, default True
         Clean specific CellProfiler feature names.
     external_metadata : str, optional
-        File with additional metadata information
-    external_join_left : str, optional
-        Merge column in the profile metadata.
-    external_join_right: str, optional
-        Merge column in the external metadata.
+        File with additional metadata information.
+        Most common use case is a QC.parquet file with QC flags for each profile.
+    external_join_on : str or list, optional
+        Merge column(s) shared by the annotated profiles and external metadata.
+        When provided, these keys are used on both sides of the external merge.
+    external_join_left : str or list, optional
+        Merge column(s) in the profile metadata.
+    external_join_right: str or list, optional
+        Merge column(s) in the external metadata.
     compression_options : str or dict, optional
         Contains compression options as input to
         pd.DataFrame.to_csv(compression=compression_options). pandas version >= 1.2.
@@ -110,38 +114,32 @@ def annotate(
             else cmap_args.get("perturbation_mode", "none"),
         )
 
-    if clean_cellprofiler:
-        annotated = cp_clean(annotated)
-
+    # Add external metadata if provided (including a QC.parquet file with QC flags)
     if isinstance(external_metadata, str):
-        if not os.path.exists(external_metadata):
-            raise FileNotFoundError(
-                f"external metadata at {external_metadata} does not exist"
-            )
-
-        external_metadata = pd.read_csv(external_metadata)
+        external_metadata = load_profiles(external_metadata)
 
     if isinstance(external_metadata, pd.DataFrame):
-        # Make a copy of the external metadata to avoid modifying the original dataframe
-        external_metadata = external_metadata.copy()
-
-        external_metadata.columns = pd.Index([
-            f"Metadata_{x}" if not x.startswith("Metadata_") else x
-            for x in external_metadata.columns
-        ])
-
+        external_merge_left = (
+            external_join_on if external_join_on is not None else external_join_left
+        )
+        external_merge_right = (
+            external_join_on if external_join_on is not None else external_join_right
+        )
         annotated = (
             annotated
             .merge(
                 external_metadata,
-                left_on=external_join_left,
-                right_on=external_join_right,
+                left_on=external_merge_left,
+                right_on=external_merge_right,
                 how="left",
                 suffixes=(None, "_external"),
             )
             .reset_index(drop=True)
             .drop_duplicates()
         )
+
+    if clean_cellprofiler:
+        annotated = cp_clean(annotated)
 
     # Reorder annotated metadata columns
     meta_cols = infer_cp_features(annotated, metadata=True)

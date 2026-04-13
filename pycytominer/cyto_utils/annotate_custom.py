@@ -129,6 +129,7 @@ def cp_clean(profiles: pd.DataFrame) -> pd.DataFrame:
         {
             "Image_Metadata_Plate": "Metadata_Plate",
             "Image_Metadata_Well": "Metadata_Well",
+            "Image_Metadata_Site": "Metadata_Site",
         },
         axis="columns",
     )
