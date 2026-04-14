@@ -199,5 +199,7 @@ def annotate(
         column for column in meta_cols if column not in prioritized_meta_cols
     ]
 
-    annotated = annotated.loc[:, prioritized_meta_cols + remaining_meta_cols + other_cols]
+    annotated = annotated.loc[
+        :, prioritized_meta_cols + remaining_meta_cols + other_cols
+    ]
     return annotated
