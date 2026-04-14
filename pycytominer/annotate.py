@@ -16,6 +16,48 @@ from pycytominer.cyto_utils import (
 from pycytominer.cyto_utils.util import write_to_file_if_user_specifies_output_details
 
 
+def _prefix_external_metadata_columns(
+    external_metadata: pd.DataFrame,
+) -> pd.DataFrame:
+    """Helper function for `external_metadata` parameters in `annotate` that adds
+    `Metadata_` prefix to external metadata columns unless already CP-style.
+    This is similar to the functionality of `load_platemap` for the `platemap` parameter
+    in `annotate`.
+
+    Parameters
+    ----------
+    external_metadata : pd.DataFrame
+        DataFrame of external metadata to be merged with profiles.
+        For example, this could be a QC.parquet file with QC flags for each profile.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with `Metadata_` prefixed columns unless already CP-style.
+    """
+
+    protected_prefixes = (
+        "Metadata_",
+        "Image_Metadata_",
+        "Cells_",
+        "Cytoplasm_",
+        "Nuclei_",
+        "Image_",
+    )
+
+    external_metadata = external_metadata.copy()
+    external_metadata.columns = pd.Index([
+        column
+        if isinstance(column, str) and column.startswith(protected_prefixes)
+        else f"Metadata_{column}"
+        if isinstance(column, str)
+        else column
+        for column in external_metadata.columns
+    ])
+
+    return external_metadata
+
+
 @write_to_file_if_user_specifies_output_details
 def annotate(
     profiles: Union[str, pd.DataFrame],
@@ -91,6 +133,11 @@ def annotate(
 
     # Load Data
     profiles = load_profiles(profiles)
+    cleaned_profile_metadata_cols = [
+        column.replace("Image_Metadata_", "Metadata_", 1)
+        for column in profiles.columns
+        if isinstance(column, str) and column.startswith("Image_Metadata_")
+    ]
     platemap = load_platemap(platemap, add_metadata_id_to_platemap)
 
     annotated = platemap.merge(
@@ -119,6 +166,7 @@ def annotate(
         external_metadata = load_profiles(external_metadata)
 
     if isinstance(external_metadata, pd.DataFrame):
+        external_metadata = _prefix_external_metadata_columns(external_metadata)
         external_merge_left = (
             external_join_on if external_join_on is not None else external_join_left
         )
@@ -144,6 +192,12 @@ def annotate(
     # Reorder annotated metadata columns
     meta_cols = infer_cp_features(annotated, metadata=True)
     other_cols = annotated.drop(meta_cols, axis="columns").columns.tolist()
+    prioritized_meta_cols = [
+        column for column in cleaned_profile_metadata_cols if column in meta_cols
+    ]
+    remaining_meta_cols = [
+        column for column in meta_cols if column not in prioritized_meta_cols
+    ]
 
-    annotated = annotated.loc[:, meta_cols + other_cols]
+    annotated = annotated.loc[:, prioritized_meta_cols + remaining_meta_cols + other_cols]
     return annotated
