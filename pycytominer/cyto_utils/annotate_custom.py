@@ -2,8 +2,63 @@
 Custom annotation functions for CMAP specific data
 """
 
+import contextlib
+
 import numpy as np
 import pandas as pd
+
+from pycytominer.cyto_utils.features import infer_cp_features
+
+
+def prepare_external_metadata_for_annotate(
+    external_metadata: pd.DataFrame,
+) -> pd.DataFrame:
+    """Make external metadata columns compatible with annotate() conventions.
+
+    This mirrors the metadata-prefixing behavior that load_platemap() applies to
+    platemap inputs, while preserving CellProfiler-style columns that should
+    remain unchanged before annotate() optionally calls cp_clean().
+
+    Parameters
+    ----------
+    external_metadata : pd.DataFrame
+        External metadata to be merged in with profiles in annotate().
+
+    Returns
+    -------
+    external_metadata : pd.DataFrame
+        External metadata with columns renamed to be compatible with annotate() conventions.
+    """
+
+    existing_cp_columns = set()
+
+    with contextlib.suppress(ValueError):
+        existing_cp_columns.update(infer_cp_features(external_metadata, metadata=True))
+
+    with contextlib.suppress(ValueError):
+        existing_cp_columns.update(
+            infer_cp_features(external_metadata, image_features=True)
+        )
+
+    # Keep Image_Metadata_* columns unchanged so external joins can still happen
+    # before cp_clean standardizes them.
+    existing_cp_columns.update([
+        column
+        for column in external_metadata.columns
+        if isinstance(column, str) and column.startswith("Image_Metadata_")
+    ])
+
+    external_metadata = external_metadata.copy()
+    external_metadata.columns = pd.Index([
+        column
+        if column in existing_cp_columns
+        else f"Metadata_{column}"
+        if isinstance(column, str)
+        else column
+        for column in external_metadata.columns
+    ])
+
+    return external_metadata
 
 
 def annotate_cmap(

@@ -12,50 +12,9 @@ from pycytominer.cyto_utils import (
     infer_cp_features,
     load_platemap,
     load_profiles,
+    prepare_external_metadata_for_annotate,
 )
 from pycytominer.cyto_utils.util import write_to_file_if_user_specifies_output_details
-
-
-def _prefix_external_metadata_columns(
-    external_metadata: pd.DataFrame,
-) -> pd.DataFrame:
-    """Helper function for `external_metadata` parameters in `annotate` that adds
-    `Metadata_` prefix to external metadata columns unless already CP-style.
-    This is similar to the functionality of `load_platemap` for the `platemap` parameter
-    in `annotate`.
-
-    Parameters
-    ----------
-    external_metadata : pd.DataFrame
-        DataFrame of external metadata to be merged with profiles.
-        For example, this could be a QC.parquet file with QC flags for each profile.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with `Metadata_` prefixed columns unless already CP-style.
-    """
-
-    protected_prefixes = (
-        "Metadata_",
-        "Image_Metadata_",
-        "Cells_",
-        "Cytoplasm_",
-        "Nuclei_",
-        "Image_",
-    )
-
-    external_metadata = external_metadata.copy()
-    external_metadata.columns = pd.Index([
-        column
-        if isinstance(column, str) and column.startswith(protected_prefixes)
-        else f"Metadata_{column}"
-        if isinstance(column, str)
-        else column
-        for column in external_metadata.columns
-    ])
-
-    return external_metadata
 
 
 @write_to_file_if_user_specifies_output_details
@@ -99,10 +58,15 @@ def annotate(
     format_broad_cmap : bool, default False
         Whether we need to add columns to make compatible with Broad CMAP naming conventions.
     clean_cellprofiler: bool, default True
-        Clean specific CellProfiler feature names.
+        Clean specific CellProfiler feature names by dropping
+        Image_ prefix.
+        Default is true as the most common use case is
+        annotating CellProfiler profiles, but this can be
+        set to False if you are not using CellProfiler.
     external_metadata : str, optional
         File with additional metadata information.
-        Most common use case is a QC.parquet file with QC flags for each profile.
+        Most common use case is a QC.parquet file with QC flags for each profile
+        that comes from coSMicQC.
     external_join_on : str or list, optional
         Merge column(s) shared by the annotated profiles and external metadata.
         When provided, these keys are used on both sides of the external merge.
@@ -133,11 +97,6 @@ def annotate(
 
     # Load Data
     profiles = load_profiles(profiles)
-    cleaned_profile_metadata_cols = [
-        column.replace("Image_Metadata_", "Metadata_", 1)
-        for column in profiles.columns
-        if isinstance(column, str) and column.startswith("Image_Metadata_")
-    ]
     platemap = load_platemap(platemap, add_metadata_id_to_platemap)
 
     annotated = platemap.merge(
@@ -166,19 +125,21 @@ def annotate(
         external_metadata = load_profiles(external_metadata)
 
     if isinstance(external_metadata, pd.DataFrame):
-        external_metadata = _prefix_external_metadata_columns(external_metadata)
-        external_merge_left = (
-            external_join_on if external_join_on is not None else external_join_left
-        )
-        external_merge_right = (
-            external_join_on if external_join_on is not None else external_join_right
-        )
+        external_metadata = prepare_external_metadata_for_annotate(external_metadata)
         annotated = (
             annotated
             .merge(
                 external_metadata,
-                left_on=external_merge_left,
-                right_on=external_merge_right,
+                left_on=(
+                    external_join_on
+                    if external_join_on is not None
+                    else external_join_left
+                ),
+                right_on=(
+                    external_join_on
+                    if external_join_on is not None
+                    else external_join_right
+                ),
                 how="left",
                 suffixes=(None, "_external"),
             )
@@ -192,14 +153,5 @@ def annotate(
     # Reorder annotated metadata columns
     meta_cols = infer_cp_features(annotated, metadata=True)
     other_cols = annotated.drop(meta_cols, axis="columns").columns.tolist()
-    prioritized_meta_cols = [
-        column for column in cleaned_profile_metadata_cols if column in meta_cols
-    ]
-    remaining_meta_cols = [
-        column for column in meta_cols if column not in prioritized_meta_cols
-    ]
-
-    annotated = annotated.loc[
-        :, prioritized_meta_cols + remaining_meta_cols + other_cols
-    ]
+    annotated = annotated.loc[:, meta_cols + other_cols]
     return annotated
